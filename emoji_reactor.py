@@ -9,9 +9,13 @@ mp_drawing = mp.solutions.drawing_utils
 
 
 SMILE_THRESHOLD = 0.35
-HEAD_TILT_THRESHOLD = 0.08  # Reduced threshold for more sensitive detection
-JAWLINE_FINGER_DISTANCE = 0.15  # Increased distance for easier detection
-BOWL_MOVEMENT_THRESHOLD = 0.05  # Threshold for bowl-shaped hand movement
+HEAD_TILT_THRESHOLD = 0.12  # Increased threshold for more pronounced head tilt
+JAWLINE_FINGER_DISTANCE = 0.2  # Increased distance for easier finger detection
+BOWL_MOVEMENT_THRESHOLD = 0.03  # Threshold for opposite hand movement
+HAND_PROXIMITY_THRESHOLD = 0.3  # Threshold for hands being near abdomen/shoulder
+OPPOSITE_CORR_THRESHOLD = -0.2  # Negative correlation threshold for opposite movement
+MIN_OPPOSITE_AMPLITUDE = 0.04   # Min normalized vertical range per hand in window
+STICKY_FRAMES_67 = 12           # Keep 67 state active this many frames to reduce flicker
 WINDOW_WIDTH = 720
 WINDOW_HEIGHT = 450
 EMOJI_WINDOW_SIZE = (WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -79,9 +83,12 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
      mp_face_mesh.FaceMesh(max_num_faces=1, min_detection_confidence=0.5) as face_mesh, \
      mp_hands.Hands(min_detection_confidence=0.5, min_tracking_confidence=0.5) as hands:
 
-    # Variables for tracking hand movement for bowl detection
-    hand_positions_history = []
-    MAX_HISTORY = 10
+    # Variables for tracking hand movement for 67 detection
+    hand_positions_history = []  # legacy window of paired positions
+    hand1_y_history = []
+    hand2_y_history = []
+    MAX_HISTORY = 20
+    clash_sticky_counter = 0
 
     while cap.isOpened():
         success, frame = cap.read()
@@ -99,43 +106,80 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
         results_face = face_mesh.process(image_rgb)
         results_hands = hands.process(image_rgb)
 
-        # Check for 67 Clash Royale (bowl-shaped hand movement) - highest priority
-        bowl_detected = False
+        # Check for 67 Clash Royale (opposite hand movement) - highest priority
+        clash_royale_detected = False
         
-        if results_hands.multi_hand_landmarks:
-            # Check for bowl-shaped movement with both hands
-            if len(results_hands.multi_hand_landmarks) >= 2:
-                hand_centers = []
-                for hand_landmarks in results_hands.multi_hand_landmarks:
-                    # Calculate hand center (middle of palm)
-                    wrist = hand_landmarks.landmark[0]
-                    middle_finger_mcp = hand_landmarks.landmark[9]
-                    hand_center_x = (wrist.x + middle_finger_mcp.x) / 2
-                    hand_center_y = (wrist.y + middle_finger_mcp.y) / 2
-                    hand_centers.append((hand_center_x, hand_center_y))
+        if results_hands.multi_hand_landmarks and len(results_hands.multi_hand_landmarks) >= 2 and results_pose.pose_landmarks:
+            # Get both hands
+            hand1_landmarks = results_hands.multi_hand_landmarks[0]
+            hand2_landmarks = results_hands.multi_hand_landmarks[1]
+            
+            # Wrist positions
+            hand1_wrist = hand1_landmarks.landmark[0]
+            hand2_wrist = hand2_landmarks.landmark[0]
+            
+            # Torso landmarks
+            pose_landmarks = results_pose.pose_landmarks.landmark
+            left_shoulder = pose_landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER]
+            right_shoulder = pose_landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER]
+            left_hip = pose_landmarks[mp_pose.PoseLandmark.LEFT_HIP]
+            right_hip = pose_landmarks[mp_pose.PoseLandmark.RIGHT_HIP]
+            
+            # Torso geometry
+            shoulder_center_y = (left_shoulder.y + right_shoulder.y) / 2
+            hip_center_y = (left_hip.y + right_hip.y) / 2
+            torso_height = max(1e-6, abs(hip_center_y - shoulder_center_y))
+            shoulder_center_x = (left_shoulder.x + right_shoulder.x) / 2
+            hip_center_x = (left_hip.x + right_hip.x) / 2
+            torso_center_x = (shoulder_center_x + hip_center_x) / 2
+            torso_center_y = (shoulder_center_y + hip_center_y) / 2
+            
+            # Proximity to torso center
+            hand1_distance = ((hand1_wrist.x - torso_center_x)**2 + (hand1_wrist.y - torso_center_y)**2)**0.5
+            hand2_distance = ((hand2_wrist.x - torso_center_x)**2 + (hand2_wrist.y - torso_center_y)**2)**0.5
+            near_torso = hand1_distance < HAND_PROXIMITY_THRESHOLD and hand2_distance < HAND_PROXIMITY_THRESHOLD
+            
+            # Normalize Y by torso height to be scale-invariant
+            hand1_norm_y = (hand1_wrist.y - torso_center_y) / torso_height
+            hand2_norm_y = (hand2_wrist.y - torso_center_y) / torso_height
+            
+            # Update histories
+            hand1_y_history.append(hand1_norm_y)
+            hand2_y_history.append(hand2_norm_y)
+            if len(hand1_y_history) > MAX_HISTORY:
+                hand1_y_history.pop(0)
+            if len(hand2_y_history) > MAX_HISTORY:
+                hand2_y_history.pop(0)
+            
+            # Analyze recent window
+            WINDOW = 10
+            if near_torso and len(hand1_y_history) >= WINDOW and len(hand2_y_history) >= WINDOW:
+                h1 = np.array(hand1_y_history[-WINDOW:])
+                h2 = np.array(hand2_y_history[-WINDOW:])
+                dy1 = np.diff(h1)
+                dy2 = np.diff(h2)
+                amp1 = float(np.ptp(h1))
+                amp2 = float(np.ptp(h2))
+                corr = 0.0
+                if np.std(dy1) > 1e-6 and np.std(dy2) > 1e-6:
+                    corr = float(np.corrcoef(dy1, dy2)[0, 1])
                 
-                # Store hand positions for movement analysis
-                if len(hand_centers) == 2:
-                    hand_positions_history.append(hand_centers)
-                    if len(hand_positions_history) > MAX_HISTORY:
-                        hand_positions_history.pop(0)
-                    
-                    # Check for bowl movement pattern (hands moving up and down together)
-                    if len(hand_positions_history) >= 5:
-                        recent_positions = hand_positions_history[-5:]
-                        y_movements = []
-                        for pos in recent_positions:
-                            avg_y = (pos[0][1] + pos[1][1]) / 2
-                            y_movements.append(avg_y)
-                        
-                        # Check for alternating up-down movement
-                        movement_variance = np.var(y_movements)
-                        if movement_variance > BOWL_MOVEMENT_THRESHOLD:
-                            bowl_detected = True
+                # Opposite movement with enough amplitude
+                if corr <= OPPOSITE_CORR_THRESHOLD and amp1 >= MIN_OPPOSITE_AMPLITUDE and amp2 >= MIN_OPPOSITE_AMPLITUDE:
+                    clash_royale_detected = True
+                    clash_sticky_counter = STICKY_FRAMES_67
+                elif clash_sticky_counter > 0:
+                    clash_royale_detected = True
+                    clash_sticky_counter -= 1
+        else:
+            # Decay sticky if hands/pose not available
+            if clash_sticky_counter > 0:
+                clash_royale_detected = True
+                clash_sticky_counter -= 1
 
         # Check for hands up (second priority)
         hands_up_detected = False
-        if results_pose.pose_landmarks and not bowl_detected:
+        if results_pose.pose_landmarks and not clash_royale_detected:
             landmarks = results_pose.pose_landmarks.landmark
             
             left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER]
@@ -148,7 +192,7 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
         
         # Check for jawline detection (third priority)
         jawline_detected = False
-        if not bowl_detected and not hands_up_detected:
+        if not clash_royale_detected and not hands_up_detected:
             # Check for head tilt using face mesh (more accurate)
             if results_face.multi_face_landmarks:
                 for face_landmarks in results_face.multi_face_landmarks:
@@ -168,16 +212,14 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                     
                     # Check if head is tilted significantly
                     if head_tilt_angle > HEAD_TILT_THRESHOLD:
-                        # For now, just trigger on head tilt (we can add finger detection later)
-                        jawline_detected = True
-                        
-                        # Optional: Check if finger is near jawline area for bonus detection
+                        # Check if finger is near jawline area (required for jawline detection)
+                        finger_near_jawline = False
                         if results_hands.multi_hand_landmarks:
                             for hand_landmarks in results_hands.multi_hand_landmarks:
                                 # Get index finger tip
                                 index_tip = hand_landmarks.landmark[8]
                                 
-                                # Define jawline area around chin and jaw
+                                # Define jawline area around chin and jaw (more generous area)
                                 jawline_area_x = chin.x
                                 jawline_area_y = chin.y
                                 
@@ -186,21 +228,26 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                                                  (index_tip.y - jawline_area_y)**2)**0.5
                                 
                                 # Also check if finger is in the general jaw area (more flexible)
-                                jaw_area_x_min = min(nose_tip.x, chin.x) - 0.1
-                                jaw_area_x_max = max(nose_tip.x, chin.x) + 0.1
-                                jaw_area_y_min = chin.y - 0.05
-                                jaw_area_y_max = chin.y + 0.1
+                                jaw_area_x_min = min(nose_tip.x, chin.x) - 0.15
+                                jaw_area_x_max = max(nose_tip.x, chin.x) + 0.15
+                                jaw_area_y_min = chin.y - 0.08
+                                jaw_area_y_max = chin.y + 0.12
                                 
                                 # Check if finger is in jaw area
                                 in_jaw_area = (jaw_area_x_min <= index_tip.x <= jaw_area_x_max and 
                                              jaw_area_y_min <= index_tip.y <= jaw_area_y_max)
                                 
+                                # Also check if finger is moving near the jawline (dynamic detection)
                                 if finger_distance < JAWLINE_FINGER_DISTANCE or in_jaw_area:
-                                    # Finger is near jawline - this confirms the gesture
+                                    finger_near_jawline = True
                                     break
+                        
+                        # Only trigger jawline detection if BOTH head tilt AND finger near jawline
+                        if finger_near_jawline:
+                            jawline_detected = True
         
         # Check facial expression for remaining states
-        if not bowl_detected and not hands_up_detected and not jawline_detected:
+        if not clash_royale_detected and not hands_up_detected and not jawline_detected:
             if results_face.multi_face_landmarks:
                 for face_landmarks in results_face.multi_face_landmarks:
                     left_corner = face_landmarks.landmark[291]
@@ -219,7 +266,7 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                             current_state = "STRAIGHT_FACE"
         
         # Set final state based on detection priority
-        if bowl_detected:
+        if clash_royale_detected:
             current_state = "CLASH_ROYALE_67"
         elif hands_up_detected:
             current_state = "HANDS_UP"
@@ -249,14 +296,70 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
         
         # Add debug information
         debug_text = f'STATE: {current_state} {emoji_name}'
+        finger_status = "No finger"
+        clash_status = "No clash"
+        
         if results_face.multi_face_landmarks:
             for face_landmarks in results_face.multi_face_landmarks:
                 left_eye = face_landmarks.landmark[33]
                 right_eye = face_landmarks.landmark[362]
+                nose_tip = face_landmarks.landmark[1]
+                chin = face_landmarks.landmark[175]
+                
                 eye_line_slope = (right_eye.y - left_eye.y) / (right_eye.x - left_eye.x) if (right_eye.x - left_eye.x) != 0 else 0
                 head_tilt_angle = abs(eye_line_slope)
                 debug_text += f' | Tilt: {head_tilt_angle:.3f}'
+                
+                # Check finger status
+                if results_hands.multi_hand_landmarks:
+                    for hand_landmarks in results_hands.multi_hand_landmarks:
+                        index_tip = hand_landmarks.landmark[8]
+                        finger_distance = ((index_tip.x - chin.x)**2 + (index_tip.y - chin.y)**2)**0.5
+                        if finger_distance < JAWLINE_FINGER_DISTANCE:
+                            finger_status = f"Finger: {finger_distance:.3f}"
+                            break
+                        else:
+                            finger_status = f"Finger: {finger_distance:.3f}"
+                
+                debug_text += f' | {finger_status}'
                 break
+        
+        # Add clash royale debug info
+        if results_hands.multi_hand_landmarks and len(results_hands.multi_hand_landmarks) >= 2 and results_pose.pose_landmarks:
+            hand1_wrist = results_hands.multi_hand_landmarks[0].landmark[0]
+            hand2_wrist = results_hands.multi_hand_landmarks[1].landmark[0]
+            pose_landmarks = results_pose.pose_landmarks.landmark
+            left_shoulder = pose_landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER]
+            right_shoulder = pose_landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER]
+            left_hip = pose_landmarks[mp_pose.PoseLandmark.LEFT_HIP]
+            right_hip = pose_landmarks[mp_pose.PoseLandmark.RIGHT_HIP]
+            shoulder_center_y = (left_shoulder.y + right_shoulder.y) / 2
+            hip_center_y = (left_hip.y + right_hip.y) / 2
+            torso_height = max(1e-6, abs(hip_center_y - shoulder_center_y))
+            shoulder_center_x = (left_shoulder.x + right_shoulder.x) / 2
+            hip_center_x = (left_hip.x + right_hip.x) / 2
+            torso_center_x = (shoulder_center_x + hip_center_x) / 2
+            torso_center_y = (shoulder_center_y + hip_center_y) / 2
+            hand1_distance = ((hand1_wrist.x - torso_center_x)**2 + (hand1_wrist.y - torso_center_y)**2)**0.5
+            hand2_distance = ((hand2_wrist.x - torso_center_x)**2 + (hand2_wrist.y - torso_center_y)**2)**0.5
+            # Estimate live correlation/amplitude if we have enough samples
+            corr_txt = "n/a"
+            amp_txt = "n/a"
+            WINDOW = 10
+            if len(hand1_y_history) >= WINDOW and len(hand2_y_history) >= WINDOW:
+                h1 = np.array(hand1_y_history[-WINDOW:])
+                h2 = np.array(hand2_y_history[-WINDOW:])
+                dy1 = np.diff(h1)
+                dy2 = np.diff(h2)
+                if np.std(dy1) > 1e-6 and np.std(dy2) > 1e-6:
+                    corr_val = float(np.corrcoef(dy1, dy2)[0, 1])
+                    corr_txt = f"corr:{corr_val:.2f}"
+                amp1 = float(np.ptp(h1))
+                amp2 = float(np.ptp(h2))
+                amp_txt = f"amp:{amp1:.2f}/{amp2:.2f}"
+            clash_status = f"Hands: {hand1_distance:.2f},{hand2_distance:.2f} {corr_txt} {amp_txt} sticky:{clash_sticky_counter}"
+        
+        debug_text += f' | {clash_status}'
         
         cv2.putText(camera_frame_resized, debug_text, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
