@@ -13,9 +13,13 @@ HEAD_TILT_THRESHOLD = 0.12  # Increased threshold for more pronounced head tilt
 JAWLINE_FINGER_DISTANCE = 0.2  # Increased distance for easier finger detection
 BOWL_MOVEMENT_THRESHOLD = 0.03  # Threshold for opposite hand movement
 HAND_PROXIMITY_THRESHOLD = 0.3  # Threshold for hands being near abdomen/shoulder
-OPPOSITE_CORR_THRESHOLD = -0.2  # Negative correlation threshold for opposite movement
-MIN_OPPOSITE_AMPLITUDE = 0.04   # Min normalized vertical range per hand in window
-STICKY_FRAMES_67 = 12           # Keep 67 state active this many frames to reduce flicker
+OPPOSITE_CORR_THRESHOLD = -0.05  # Much more relaxed for faster detection
+MIN_OPPOSITE_AMPLITUDE = 0.025   # Lowered for faster motion
+MIN_OPPOSITE_VEL = 0.015         # Lowered velocity threshold
+STICKY_FRAMES_67 = 15            # Shorter sticky for faster response
+SMOOTH_ALPHA = 0.6               # Less smoothing for faster response
+OPP_WINDOW = 6                   # Much shorter analysis window
+OPP_REQUIRED = 3                 # Fewer opposite frames needed
 WINDOW_WIDTH = 720
 WINDOW_HEIGHT = 450
 EMOJI_WINDOW_SIZE = (WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -87,7 +91,11 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
     hand_positions_history = []  # legacy window of paired positions
     hand1_y_history = []
     hand2_y_history = []
-    MAX_HISTORY = 20
+    hand1_y_smooth_history = []
+    hand2_y_smooth_history = []
+    hand1_smooth_prev = None
+    hand2_smooth_prev = None
+    MAX_HISTORY = 15
     clash_sticky_counter = 0
 
     while cap.isOpened():
@@ -142,30 +150,59 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
             # Normalize Y by torso height to be scale-invariant
             hand1_norm_y = (hand1_wrist.y - torso_center_y) / torso_height
             hand2_norm_y = (hand2_wrist.y - torso_center_y) / torso_height
+
+            # Exponential moving average smoothing (reduces jitter, robust at speed)
+            if hand1_smooth_prev is None:
+                hand1_smooth_prev = hand1_norm_y
+                hand2_smooth_prev = hand2_norm_y
+            hand1_smooth = SMOOTH_ALPHA * hand1_smooth_prev + (1 - SMOOTH_ALPHA) * hand1_norm_y
+            hand2_smooth = SMOOTH_ALPHA * hand2_smooth_prev + (1 - SMOOTH_ALPHA) * hand2_norm_y
+            hand1_smooth_prev = hand1_smooth
+            hand2_smooth_prev = hand2_smooth
             
             # Update histories
             hand1_y_history.append(hand1_norm_y)
             hand2_y_history.append(hand2_norm_y)
+            hand1_y_smooth_history.append(hand1_smooth)
+            hand2_y_smooth_history.append(hand2_smooth)
             if len(hand1_y_history) > MAX_HISTORY:
                 hand1_y_history.pop(0)
             if len(hand2_y_history) > MAX_HISTORY:
                 hand2_y_history.pop(0)
+            if len(hand1_y_smooth_history) > MAX_HISTORY:
+                hand1_y_smooth_history.pop(0)
+            if len(hand2_y_smooth_history) > MAX_HISTORY:
+                hand2_y_smooth_history.pop(0)
             
             # Analyze recent window
-            WINDOW = 10
-            if near_torso and len(hand1_y_history) >= WINDOW and len(hand2_y_history) >= WINDOW:
-                h1 = np.array(hand1_y_history[-WINDOW:])
-                h2 = np.array(hand2_y_history[-WINDOW:])
+            if near_torso and len(hand1_y_smooth_history) >= OPP_WINDOW and len(hand2_y_smooth_history) >= OPP_WINDOW:
+                h1 = np.array(hand1_y_smooth_history[-OPP_WINDOW:])
+                h2 = np.array(hand2_y_smooth_history[-OPP_WINDOW:])
                 dy1 = np.diff(h1)
                 dy2 = np.diff(h2)
                 amp1 = float(np.ptp(h1))
                 amp2 = float(np.ptp(h2))
-                corr = 0.0
-                if np.std(dy1) > 1e-6 and np.std(dy2) > 1e-6:
-                    corr = float(np.corrcoef(dy1, dy2)[0, 1])
-                
-                # Opposite movement with enough amplitude
-                if corr <= OPPOSITE_CORR_THRESHOLD and amp1 >= MIN_OPPOSITE_AMPLITUDE and amp2 >= MIN_OPPOSITE_AMPLITUDE:
+                # Count opposite-direction frames with velocity threshold
+                opp_count = 0
+                for i in range(min(len(dy1), len(dy2))):
+                    if abs(dy1[i]) >= MIN_OPPOSITE_VEL and abs(dy2[i]) >= MIN_OPPOSITE_VEL and (dy1[i] * dy2[i] < 0):
+                        opp_count += 1
+                # Lagged correlation to tolerate slight timing offsets (-1, 0, +1)
+                corr_vals = []
+                for lag in (-1, 0, 1):
+                    if lag < 0 and len(dy2) + lag > 1:
+                        c = np.corrcoef(dy1[-(len(dy2)+lag):], dy2[:len(dy2)+lag])[0, 1] if np.std(dy1[-(len(dy2)+lag):]) > 1e-6 and np.std(dy2[:len(dy2)+lag]) > 1e-6 else 0.0
+                        corr_vals.append(float(c))
+                    elif lag == 0:
+                        c = np.corrcoef(dy1, dy2)[0, 1] if np.std(dy1) > 1e-6 and np.std(dy2) > 1e-6 else 0.0
+                        corr_vals.append(float(c))
+                    else:
+                        if len(dy1) + (-lag) > 1:
+                            c = np.corrcoef(dy1[:len(dy1)+(-lag)], dy2[-(len(dy1)+(-lag)):])[0, 1] if np.std(dy1[:len(dy1)+(-lag)]) > 1e-6 and np.std(dy2[-(len(dy1)+(-lag)):]) > 1e-6 else 0.0
+                            corr_vals.append(float(c))
+                corr_min = float(min(corr_vals)) if len(corr_vals) > 0 else 0.0
+                # Decision: enough opposite frames OR sufficiently negative correlation, with amplitude
+                if (opp_count >= OPP_REQUIRED or corr_min <= OPPOSITE_CORR_THRESHOLD) and amp1 >= MIN_OPPOSITE_AMPLITUDE and amp2 >= MIN_OPPOSITE_AMPLITUDE:
                     clash_royale_detected = True
                     clash_sticky_counter = STICKY_FRAMES_67
                 elif clash_sticky_counter > 0:
@@ -342,22 +379,28 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
             torso_center_y = (shoulder_center_y + hip_center_y) / 2
             hand1_distance = ((hand1_wrist.x - torso_center_x)**2 + (hand1_wrist.y - torso_center_y)**2)**0.5
             hand2_distance = ((hand2_wrist.x - torso_center_x)**2 + (hand2_wrist.y - torso_center_y)**2)**0.5
-            # Estimate live correlation/amplitude if we have enough samples
-            corr_txt = "n/a"
-            amp_txt = "n/a"
-            WINDOW = 10
-            if len(hand1_y_history) >= WINDOW and len(hand2_y_history) >= WINDOW:
-                h1 = np.array(hand1_y_history[-WINDOW:])
-                h2 = np.array(hand2_y_history[-WINDOW:])
+            # Estimate live correlation/amplitude if we have enough samples (use smoothed series)
+            corr_txt = "corr:n/a"
+            amp_txt = "amp:n/a"
+            opp_txt = "opp:n/a"
+            if len(hand1_y_smooth_history) >= OPP_WINDOW and len(hand2_y_smooth_history) >= OPP_WINDOW:
+                h1 = np.array(hand1_y_smooth_history[-OPP_WINDOW:])
+                h2 = np.array(hand2_y_smooth_history[-OPP_WINDOW:])
                 dy1 = np.diff(h1)
                 dy2 = np.diff(h2)
+                opp_count = 0
+                for i in range(min(len(dy1), len(dy2))):
+                    if abs(dy1[i]) >= MIN_OPPOSITE_VEL and abs(dy2[i]) >= MIN_OPPOSITE_VEL and (dy1[i] * dy2[i] < 0):
+                        opp_count += 1
+                opp_txt = f"opp:{opp_count}/{max(len(dy1),1)}"
+                corr_val = 0.0
                 if np.std(dy1) > 1e-6 and np.std(dy2) > 1e-6:
                     corr_val = float(np.corrcoef(dy1, dy2)[0, 1])
-                    corr_txt = f"corr:{corr_val:.2f}"
+                corr_txt = f"corr:{corr_val:.2f}"
                 amp1 = float(np.ptp(h1))
                 amp2 = float(np.ptp(h2))
                 amp_txt = f"amp:{amp1:.2f}/{amp2:.2f}"
-            clash_status = f"Hands: {hand1_distance:.2f},{hand2_distance:.2f} {corr_txt} {amp_txt} sticky:{clash_sticky_counter}"
+            clash_status = f"Hands:{hand1_distance:.2f},{hand2_distance:.2f} {opp_txt} {corr_txt} {amp_txt} sticky:{clash_sticky_counter}"
         
         debug_text += f' | {clash_status}'
         
