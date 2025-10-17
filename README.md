@@ -9,6 +9,12 @@ A real-time camera-based emoji display application that uses MediaPipe to detect
 - **Default State**: Straight face → displays neutral emoji 😐
 - **Real-time Processing**: Live camera feed with instant emoji reactions
 
+## Recent Updates
+
+- Added new emoji assets: `jawline.png` and `67clashroyale.webp`.
+  - These are bundled in the project root and can be used as alternative display images.
+  - To use them, either replace one of the default image files or extend `emoji_reactor.py` to load additional states.
+
 ## Requirements
 
 - Python 3.12 (Homebrew: `brew install python@3.12`)
@@ -36,6 +42,8 @@ A real-time camera-based emoji display application that uses MediaPipe to detect
    - `smile.jpg` - Smiling face emoji
    - `plain.png` - Straight face emoji  
    - `air.jpg` - Hands up emoji
+   - `jawline.png` - Jawline-themed emoji asset
+   - `67clashroyale.webp` - 67 Clash Royale-themed emoji asset
 
 ## Usage
 
@@ -70,6 +78,8 @@ The application uses two MediaPipe solutions:
 1. **Hands Up** (highest priority) - Overrides facial expression detection
 2. **Smiling** - Detected when mouth aspect ratio exceeds threshold
 3. **Straight Face** - Default state when no smile is detected
+4. **Finger on Jawline** - Detected when you flex your jawline with your finger pouch
+5. **67 Emote** - Detected when you move your hands like the 67 meme
 
 ## Customization
 
@@ -83,6 +93,8 @@ Replace the image files with your own:
 - `smile.jpg` - Your smiling emoji
 - `plain.png` - Your neutral emoji
 - `air.jpg` - Your hands up emoji
+- `jawline.png` - Flex your jawline (if you have)
+- `67clashroyale.webp` - Your 67 meme
 
 ## Troubleshooting
 
@@ -92,11 +104,6 @@ Replace the image files with your own:
 - Quit and relaunch the terminal/editor after changing permissions
 - Ensure no other app is using the camera
 - Try different camera indices by changing `cv2.VideoCapture(0)` to `cv2.VideoCapture(1)`
-
-### Emoji Images Not Loading
-- Verify image files are in the same directory as the script
-- Check file names match exactly: `smile.jpg`, `plain.png`, `air.jpg`
-- Ensure image files are not corrupted
 
 ### Detection Issues
 - Ensure good lighting on your face
@@ -120,4 +127,4 @@ See `requirements.txt` for installation and `requirements-lock.txt` for pinned v
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License.
