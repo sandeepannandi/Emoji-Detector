@@ -31,6 +31,7 @@ try:
     jawline_emoji = cv2.imread("jawline.png")
     clash_royale_emoji = cv2.imread("67clashroyale.webp")
     pouch_emoji = cv2.imread("ishowspeedpouch.jpg")
+    tongue_emoji = cv2.imread("kohlitongueout.png")
 
     if smiling_emoji is None:
         raise FileNotFoundError("smile.jpg not found")
@@ -44,6 +45,8 @@ try:
         raise FileNotFoundError("67clashroyale.webp not found")
     if pouch_emoji is None:
         raise FileNotFoundError("ishowspeedpouch.jpg not found")
+    if tongue_emoji is None:
+        raise FileNotFoundError("kohlitongueout.png not found")
 
     smiling_emoji = cv2.resize(smiling_emoji, EMOJI_WINDOW_SIZE)
     straight_face_emoji = cv2.resize(straight_face_emoji, EMOJI_WINDOW_SIZE)
@@ -51,6 +54,7 @@ try:
     jawline_emoji = cv2.resize(jawline_emoji, EMOJI_WINDOW_SIZE)
     clash_royale_emoji = cv2.resize(clash_royale_emoji, EMOJI_WINDOW_SIZE)
     pouch_emoji = cv2.resize(pouch_emoji, EMOJI_WINDOW_SIZE)
+    tongue_emoji = cv2.resize(tongue_emoji, EMOJI_WINDOW_SIZE)
     
 except Exception as e:
     print("Error loading emoji images!")
@@ -62,6 +66,7 @@ except Exception as e:
     print("- jawline.png (jawline flex)")
     print("- 67clashroyale.webp (67 meme)")
     print("- ishowspeedpouch.jpg (lip pouch)")
+    print("- kohlitongueout.png (tongue out)")
     exit()
 
 blank_emoji = np.zeros((EMOJI_WINDOW_SIZE[0], EMOJI_WINDOW_SIZE[1], 3), dtype=np.uint8)
@@ -88,6 +93,7 @@ print("  Straight face for neutral emoji")
 print("  Tilt head left/right + finger on jawline for jawline flex")
 print("  Move both hands up/down in bowl shape for 67 meme")
 print("  Push lips forward (pouch) for lip pouch emoji")
+print("  Stick tongue out for tongue emoji")
 
 with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose, \
      mp_face_mesh.FaceMesh(max_num_faces=1, min_detection_confidence=0.5) as face_mesh, \
@@ -220,9 +226,31 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                 clash_royale_detected = True
                 clash_sticky_counter -= 1
 
-        # Check for hands up (second priority)
+        # Check for tongue out detection (second priority - higher than hands up)
+        tongue_detected = False
+        if not clash_royale_detected:
+            if results_face.multi_face_landmarks:
+                for face_landmarks in results_face.multi_face_landmarks:
+                    # Get mouth landmarks for tongue detection
+                    upper_lip = face_landmarks.landmark[13]
+                    lower_lip = face_landmarks.landmark[14]
+                    left_corner = face_landmarks.landmark[291]
+                    right_corner = face_landmarks.landmark[61]
+                    
+                    # Calculate mouth opening (height)
+                    mouth_height = ((lower_lip.x - upper_lip.x)**2 + (lower_lip.y - upper_lip.y)**2)**0.5
+                    mouth_width = ((right_corner.x - left_corner.x)**2 + (right_corner.y - left_corner.y)**2)**0.5
+                    
+                    # Tongue detection: minimal mouth opening with tongue visible
+                    if mouth_width > 0:
+                        mouth_aspect_ratio = mouth_height / mouth_width
+                        # Detect tongue with minimal mouth opening (very restrictive)
+                        if mouth_aspect_ratio > 0.2 and mouth_height > 0.01 and mouth_height < 0.03:  # Very narrow range for tongue
+                            tongue_detected = True
+
+        # Check for hands up (third priority)
         hands_up_detected = False
-        if results_pose.pose_landmarks and not clash_royale_detected:
+        if results_pose.pose_landmarks and not clash_royale_detected and not tongue_detected:
             landmarks = results_pose.pose_landmarks.landmark
             
             left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER]
@@ -233,9 +261,9 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
             if (left_wrist.y < left_shoulder.y) or (right_wrist.y < right_shoulder.y):
                 hands_up_detected = True
         
-        # Check for jawline detection (third priority)
+        # Check for jawline detection (fourth priority)
         jawline_detected = False
-        if not clash_royale_detected and not hands_up_detected:
+        if not clash_royale_detected and not tongue_detected and not hands_up_detected:
             # Check for head tilt using face mesh (more accurate)
             if results_face.multi_face_landmarks:
                 for face_landmarks in results_face.multi_face_landmarks:
@@ -289,9 +317,9 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                         if finger_near_jawline:
                             jawline_detected = True
         
-        # Check for lip pouch detection (fourth priority)
+        # Check for lip pouch detection (fifth priority)
         pouch_detected = False
-        if not clash_royale_detected and not hands_up_detected and not jawline_detected:
+        if not clash_royale_detected and not tongue_detected and not hands_up_detected and not jawline_detected:
             if results_face.multi_face_landmarks:
                 for face_landmarks in results_face.multi_face_landmarks:
                     # Get lip landmarks for pouch detection
@@ -309,7 +337,7 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                         pouch_detected = True
         
         # Check facial expression for remaining states
-        if not clash_royale_detected and not hands_up_detected and not jawline_detected and not pouch_detected:
+        if not clash_royale_detected and not hands_up_detected and not jawline_detected and not pouch_detected and not tongue_detected:
             if results_face.multi_face_landmarks:
                 for face_landmarks in results_face.multi_face_landmarks:
                     left_corner = face_landmarks.landmark[291]
@@ -330,6 +358,8 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
         # Set final state based on detection priority
         if clash_royale_detected:
             current_state = "CLASH_ROYALE_67"
+        elif tongue_detected:
+            current_state = "TONGUE_OUT"
         elif hands_up_detected:
             current_state = "HANDS_UP"
         elif jawline_detected:
@@ -355,6 +385,9 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
         elif current_state == "LIP_POUCH":
             emoji_to_display = pouch_emoji
             emoji_name = "👄"
+        elif current_state == "TONGUE_OUT":
+            emoji_to_display = tongue_emoji
+            emoji_name = "😛"
         else:
             emoji_to_display = blank_emoji
             emoji_name = "❓"
