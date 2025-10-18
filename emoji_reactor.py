@@ -30,6 +30,7 @@ try:
     hands_up_emoji = cv2.imread("air.jpg")
     jawline_emoji = cv2.imread("jawline.png")
     clash_royale_emoji = cv2.imread("67clashroyale.webp")
+    pouch_emoji = cv2.imread("ishowspeedpouch.jpg")
 
     if smiling_emoji is None:
         raise FileNotFoundError("smile.jpg not found")
@@ -41,12 +42,15 @@ try:
         raise FileNotFoundError("jawline.png not found")
     if clash_royale_emoji is None:
         raise FileNotFoundError("67clashroyale.webp not found")
+    if pouch_emoji is None:
+        raise FileNotFoundError("ishowspeedpouch.jpg not found")
 
     smiling_emoji = cv2.resize(smiling_emoji, EMOJI_WINDOW_SIZE)
     straight_face_emoji = cv2.resize(straight_face_emoji, EMOJI_WINDOW_SIZE)
     hands_up_emoji = cv2.resize(hands_up_emoji, EMOJI_WINDOW_SIZE)
     jawline_emoji = cv2.resize(jawline_emoji, EMOJI_WINDOW_SIZE)
     clash_royale_emoji = cv2.resize(clash_royale_emoji, EMOJI_WINDOW_SIZE)
+    pouch_emoji = cv2.resize(pouch_emoji, EMOJI_WINDOW_SIZE)
     
 except Exception as e:
     print("Error loading emoji images!")
@@ -57,6 +61,7 @@ except Exception as e:
     print("- air.jpg (hands up)")
     print("- jawline.png (jawline flex)")
     print("- 67clashroyale.webp (67 meme)")
+    print("- ishowspeedpouch.jpg (lip pouch)")
     exit()
 
 blank_emoji = np.zeros((EMOJI_WINDOW_SIZE[0], EMOJI_WINDOW_SIZE[1], 3), dtype=np.uint8)
@@ -82,6 +87,7 @@ print("  Smile for smiling emoji")
 print("  Straight face for neutral emoji")
 print("  Tilt head left/right + finger on jawline for jawline flex")
 print("  Move both hands up/down in bowl shape for 67 meme")
+print("  Push lips forward (pouch) for lip pouch emoji")
 
 with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose, \
      mp_face_mesh.FaceMesh(max_num_faces=1, min_detection_confidence=0.5) as face_mesh, \
@@ -283,8 +289,27 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
                         if finger_near_jawline:
                             jawline_detected = True
         
-        # Check facial expression for remaining states
+        # Check for lip pouch detection (fourth priority)
+        pouch_detected = False
         if not clash_royale_detected and not hands_up_detected and not jawline_detected:
+            if results_face.multi_face_landmarks:
+                for face_landmarks in results_face.multi_face_landmarks:
+                    # Get lip landmarks for pouch detection
+                    upper_lip_center = face_landmarks.landmark[13]
+                    lower_lip_center = face_landmarks.landmark[14]
+                    nose_tip = face_landmarks.landmark[1]
+                    
+                    # Calculate distance from lips to nose (forward projection)
+                    upper_lip_distance = ((upper_lip_center.x - nose_tip.x)**2 + (upper_lip_center.y - nose_tip.y)**2)**0.5
+                    lower_lip_distance = ((lower_lip_center.x - nose_tip.x)**2 + (lower_lip_center.y - nose_tip.y)**2)**0.5
+                    
+                    # Pouch detection: lips pushed forward (closer to nose in Z-projection)
+                    avg_lip_distance = (upper_lip_distance + lower_lip_distance) / 2
+                    if avg_lip_distance < 0.04:  # More restrictive threshold for actual pouch
+                        pouch_detected = True
+        
+        # Check facial expression for remaining states
+        if not clash_royale_detected and not hands_up_detected and not jawline_detected and not pouch_detected:
             if results_face.multi_face_landmarks:
                 for face_landmarks in results_face.multi_face_landmarks:
                     left_corner = face_landmarks.landmark[291]
@@ -309,6 +334,8 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
             current_state = "HANDS_UP"
         elif jawline_detected:
             current_state = "JAWLINE_FLEX"
+        elif pouch_detected:
+            current_state = "LIP_POUCH"
         
         if current_state == "SMILING":
             emoji_to_display = smiling_emoji
@@ -325,6 +352,9 @@ with mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as 
         elif current_state == "CLASH_ROYALE_67":
             emoji_to_display = clash_royale_emoji
             emoji_name = "67"
+        elif current_state == "LIP_POUCH":
+            emoji_to_display = pouch_emoji
+            emoji_name = "👄"
         else:
             emoji_to_display = blank_emoji
             emoji_name = "❓"
